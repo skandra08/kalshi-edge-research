@@ -23,6 +23,41 @@ principles and scores the result against the market on settled outcomes.
 - **Forward test:** a collector logs live quotes, the options smile and model prices; settlement
   is joined later, so the options-surface model is evaluated strictly out of sample.
 
+#### Results: 20,354 observations, 468 hourly events (15 Sep - 4 Oct 2026), 95% CIs clustered by event
+**Headline (a negative result): Kalshi's hourly BTC ladder is priced better than every volatility
+model I built.** Brier(model) minus Brier(market mid), positive = model worse:
+
+![model vs market](results/dbrier.png)
+
+| | 10 min to settle | 30 min to settle |
+|---|---|---|
+| Gaussian + Deribit DVOL | +0.0084 [0.0059, 0.0110] | +0.0067 [0.0050, 0.0084] |
+| Gaussian + EWMA | +0.0056 [0.0036, 0.0078] | +0.0046 [0.0032, 0.0058] |
+| Gaussian + HAR-RV (walk-forward) | +0.0040 [0.0024, 0.0058] | +0.0030 [0.0019, 0.0039] |
+| **Student-t + HAR-RV** | **+0.0019 [0.0004, 0.0037]** | **+0.0016 [0.0006, 0.0026]** |
+
+- **Slow vol is the wrong tool for an hourly contract.** DVOL (a 30-day implied vol) is the worst
+  input, then EWMA, then HAR with intraday seasonality; fat tails (Student-t / empirical) beat
+  Gaussian at every horizon.
+- **The edge is not tradeable.** Walk-forward fee-aware trading of the best models: +0.1c per
+  contract before cent-rounding, **-0.6c after** (CI spans zero); the Gaussian models lose
+  1.4-3.2c [CIs below zero].
+- **No static arbitrage.** 1 monotonicity violation across 20k quotes, gross 1c, negative net.
+- **Where the market wins:** near the money (|distance to strike| < 1 model sigma: gap +0.003,
+  CI above zero) and in US trading hours (12-17 UTC: +0.0023 [0.0010, 0.0037]); far from the
+  strike the model and market agree (|z| > 1.5: gap ~ 0). The gap also grows as settlement
+  approaches (largest at 5 min, ~0 at 45 min), pointing to real-time information.
+- **A hypothesis I tested and mostly rejected:** that the market simply has a better spot
+  (Kalshi settles on the multi-exchange CF BRTI; I use Coinbase). The ladder-implied center sits
+  only ~$4 above Coinbase (+0.03-0.05 sigma). Correcting spot by a walk-forward estimate of that
+  basis closes only **5-7%** of the gap, so most of the market's near-the-money edge is
+  unexplained (candidates: time-varying index noise, order-flow/momentum information).
+
+Caveats: 20 days, one regime; few observations 60 min out (markets open about an hour before
+settlement); the zero-drift martingale assumption ignores BTC's realised drift in the window.
+The skew-aware options-surface model cannot be tested on history (no free historical option
+surfaces) and is being evaluated forward by the collector.
+
 ### 2. Recurring markets: is there an edge in "bet NO on rain, every time"?
 Kalshi lists a daily "will it rain in <city>?" market for ~20 US cities (YES if measured
 precipitation is strictly above 0 in). `recurring.py` / `rain_study.py` test:
@@ -66,7 +101,7 @@ extension, evaluated on common random numbers. Validated against analytic fill r
 Look-ahead-safe engine, walk-forward validation, Probabilistic/Deflated Sharpe.
 
 ## Status
-The rain study is complete (above). The BTC-digitals historical study and the options-surface forward test are still running; their results will be added as they finish, and null results will be reported as null.
+The rain study and the BTC-digitals historical study are complete (above). The options-surface forward test is accumulating data. Next: a breadth screen of ~690 recurring Kalshi series and a forecast-based model for daily-high-temperature ladders.
 Forward data accumulates in `data_live/`.
 
 ## Run it
