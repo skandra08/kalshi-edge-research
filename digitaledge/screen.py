@@ -190,6 +190,21 @@ def boot_mean(x, clusters, n_boot=1500, seed=0):
     return float(s.sum() / c.sum()), float(np.quantile(b, .025)), float(np.quantile(b, .975)), float((b <= 0).mean())
 
 
+def exact_binom_p(pnl, cost_plus_fee, clusters):
+    """One-sided exact binomial p-value for H0: win probability <= break-even (price + fee).
+
+    Works when the sample has zero variance (all wins), where a bootstrap would wrongly report
+    certainty. Contracts in one event are dependent, so the effective sample size is the number
+    of independent events: each event contributes its win fraction."""
+    from scipy.stats import binom
+    win = (np.asarray(pnl) + np.asarray(cost_plus_fee)) > 0.5          # payoff 1 happened
+    ev = pd.Series(win.astype(float)).groupby(np.asarray(clusters)).mean()
+    n = len(ev)
+    wins = int(round(ev.sum()))
+    be = float(np.clip(np.mean(cost_plus_fee), 1e-6, 1 - 1e-6))
+    return float(binom.sf(wins - 1, n, be))
+
+
 def bh_fdr(p, alpha=0.05):
     """Benjamini-Hochberg: boolean mask of discoveries at FDR level alpha."""
     p = np.asarray(p, float)
@@ -221,11 +236,16 @@ def evaluate(q, fee_mult_by_series=None, min_n=40, n_boot=1500, min_events=25, m
             if gg["day"].nunique() < min_events:      # too few independent events: bootstrap is meaningless
                 continue
             pnl = pnl_rule(gg, side, fm.get(series, 1.0))
-            m, lo, hi, p = boot_mean(pnl, gg["day"], n_boot)
+            m, lo, hi, p_boot = boot_mean(pnl, gg["day"], n_boot)
+            ask = (gg["yes_ask"] if side == "yes" else 1 - gg["yes_bid"]).to_numpy()
+            from .digital import fee_per_contract_amortised
+            cpf = ask + fm.get(series, 1.0) * fee_per_contract_amortised(ask)
+            p = max(p_boot, exact_binom_p(pnl, cpf, gg["day"]))     # the more conservative of the two
             row = dict(series=series, frac=frac, rule=name, n=len(gg), days=gg["day"].nunique(), pnl=m, lo=lo, hi=hi, p=p,
-                       cost=float(np.mean(gg["yes_ask"] if side == "yes" else 1 - gg["yes_bid"])))
+                       p_boot=p_boot, cost=float(np.mean(ask)))
             if gg["day"][e].nunique() >= min_events_half and gg["day"][~e].nunique() >= min_events_half:
                 tm, tl, th, tp = boot_mean(pnl[~e], gg["day"][~e], n_boot)
+                tp = max(tp, exact_binom_p(pnl[~e], cpf[~e], gg["day"][~e]))
                 trm, trl, trh, trp = boot_mean(pnl[e], gg["day"][e], n_boot)
                 row.update(train_pnl=trm, train_p=trp, test_pnl=tm, test_lo=tl, test_hi=th, test_p=tp)
             rows.append(row)
@@ -233,7 +253,7 @@ def evaluate(q, fee_mult_by_series=None, min_n=40, n_boot=1500, min_events=25, m
     if t.empty:
         return t
     t["fdr_sig"] = bh_fdr(t["p"].to_numpy())
-    t["replicates"] = t["fdr_sig"] & (t.get("test_lo", np.nan) > 0)
+    t["replicates"] = t["fdr_sig"] & (t.get("test_p", 1.0) < 0.05)
     return t
 
 

@@ -50,3 +50,21 @@ def test_series_with_too_few_independent_events_are_not_tested():
     q = _fake(n_series=1, n=600, planted=("S0",), edge=0.2)
     q["event_ticker"] = (np.arange(len(q)) // 300).astype(str)       # only 2 independent events
     assert S.evaluate(q, n_boot=200).empty
+
+
+def test_all_wins_at_high_price_is_not_significant():
+    """45 straight wins at a 98c price cannot prove the win rate beats 98%: the bootstrap would
+    claim certainty; the exact test must not."""
+    n = 45
+    pnl = np.full(n, 0.02 - 0.0014)
+    p = S.exact_binom_p(pnl, np.full(n, 0.98 + 0.0014), np.arange(n))
+    assert p > 0.3
+
+
+def test_exact_test_detects_real_edge():
+    rng = np.random.default_rng(0)
+    n = 400
+    win = rng.random(n) < 0.80                      # true win rate 80% vs 60% price
+    cost = np.full(n, 0.60)
+    pnl = np.where(win, 1 - 0.60, -0.60)
+    assert S.exact_binom_p(pnl, cost, np.arange(n)) < 0.001
