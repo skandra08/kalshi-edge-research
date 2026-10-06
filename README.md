@@ -1,75 +1,66 @@
-# Market-Making Simulator with Hawkes Order Flow
+# kalshi-edge-research
 
-Event-driven simulator for studying **passive market making under adverse selection**.
-Order flow is a bivariate **Hawkes process** (self/cross-exciting buys and sells) with
-permanent price impact, so bursts of flow are informative and quoting into them loses
-money. On top of it: **Avellaneda–Stoikov** inventory-aware quoting, and an
-**intensity-aware extension** that widens the side most likely to be picked off.
+Quantitative research on **prediction-market pricing**: where Kalshi's prices are efficient,
+where they are not, and whether any gap survives fees. Everything is tested on real settled
+outcomes with event-clustered inference and walk-forward (never in-sample) evaluation.
 
-Also included: `quantlab`, a bias-aware backtesting/validation toolkit (look-ahead-safe
-engine, walk-forward, Deflated Sharpe) in the same repo.
+## Projects
 
-## Why it's built this way
-- **Common random numbers.** Order flow does not depend on our quotes, so each seed's
-  path is generated once and every strategy trades the *same* path. Strategy
-  comparisons use paired differences, which is far lower-variance than independent runs.
-- **Validated against theory.** Tests check Hawkes mean intensity = mu/(1-n), overdispersed
-  inter-arrivals (clustering), and that simulated fill rates match the analytic
-  Poisson `mu * exp(-k*d)` when excitation and impact are switched off.
-- **Adverse selection is measured, not assumed:** per-fill *markout* (mid 10s later vs
-  fill price) is reported alongside P&L.
-- **Held-out evaluation.** The one tuned parameter (`widen`) was chosen on seeds 0-299;
-  the demo reports seeds 10000+.
+### 1. `digitaledge`: pricing BTC "above $X" contracts off options and vol models
+Kalshi's hourly Bitcoin contracts are digital options. This project prices them from first
+principles and scores the result against the market on settled outcomes.
+- **Vol models (walk-forward):** HAR-RV with intraday seasonality, EWMA, Deribit DVOL; Gaussian,
+  Student-t and empirical tails.
+- **Microstructure details:** Kalshi settles on a 60-second average of the index, which shortens
+  the effective variance horizon by 2/3 minute; this is modelled explicitly.
+- **Options surface:** SVI smile fit to Deribit's live chain; skew-aware digital price
+  `N(d2) - vega * d(sigma)/dK`, checked against finite-difference `-dC/dK` and a butterfly
+  no-arbitrage test.
+- **Inference:** Brier/log-loss with paired cluster-bootstrap by event (strikes in one hour share
+  a single outcome, so contracts are not independent).
+- **Trading test:** fee-aware backtest (`ceil(0.07 * P * (1-P))` taker fee) with the edge threshold
+  chosen on an earlier period and evaluated on a later one; static-arbitrage scan of strike ladders.
+- **Forward test:** a collector logs live quotes, the options smile and model prices; settlement
+  is joined later, so the options-surface model is evaluated strictly out of sample.
 
-## Running it locally (free, no cloud needed)
-```bash
-git clone https://github.com/skandra08/kalshi-edge-research && cd kalshi-edge-research
-pip install -e ".[dev]"
-pytest -q
+### 2. Recurring markets: is there an edge in "bet NO on rain, every time"?
+Kalshi lists a daily "will it rain in <city>?" market for ~20 US cities (YES if measured
+precipitation is strictly above 0 in). `recurring.py` / `rain_study.py` test:
+- the naive always-NO rule, by lead time, price bucket and city, net of fees;
+- calibration by price (favorite-longshot bias, documented for Kalshi by
+  [Whelan 2025](https://www.karlwhelan.com/Papers/Kalshi.pdf));
+- a walk-forward forecast model built from *as-of* archived weather forecasts (Open-Meteo
+  previous-runs, so no hindsight) against the market price.
 
-# forward data: leave this running (laptop, Raspberry Pi, or a $5 VPS); it commits hourly
-bash scripts/collect_forever.sh
+### 3. `mmsim`: market making under adverse selection
+Hawkes-process order flow with price impact, Avellaneda-Stoikov quoting, and an intensity-aware
+extension, evaluated on common random numbers. Validated against analytic fill rates.
 
-# historical studies (API responses are cached under data/, so reruns are instant)
-python -m digitaledge study --start 2026-09-15 --end 2026-10-05
-```
-Kalshi rate-limits public requests, so first-time pulls take a while; the cache makes them resumable.
+### 4. `quantlab`: bias-aware backtesting toolkit
+Look-ahead-safe engine, walk-forward validation, Probabilistic/Deflated Sharpe.
+
+## Status
+Results sections are filled in as each study completes; null results are reported as null.
+Forward data accumulates in `data_live/`.
 
 ## Run it
 ```bash
+git clone https://github.com/skandra08/kalshi-edge-research && cd kalshi-edge-research
 pip install -e ".[dev]"
-pytest -q                        # 16 tests
-python examples/run_mm_demo.py   # table + examples/mm_results.png
+pytest -q                                   # 30 tests
+python -m digitaledge study --start 2026-09-15 --end 2026-10-05
+bash scripts/collect_forever.sh             # local forward-data collector
+python -m digitaledge.live                  # one live snapshot vs the options surface
 ```
-
-## Results (400 held-out 10-minute paths, units = ticks)
-| Strategy | Mean P&L | P&L sd | Sharpe | Inventory sd | Fills | Markout/fill | Paired t vs A-S |
-|---|---|---|---|---|---|---|---|
-| Fixed spread (2 ticks) | 514.9 | 169.6 | 3.04 | 5.30 | 409 | 1.27 | +4.0 |
-| Avellaneda-Stoikov | 483.2 | 55.1 | 8.77 | 1.51 | 371 | 1.30 | - |
-| Hawkes-aware A-S | 511.8 | 56.4 | 9.07 | 1.37 | 308 | 1.66 | +25.2 |
-
-- Inventory control cuts P&L volatility ~3x for similar P&L (fixed quotes just carry risk).
-- Widening against excess flow intensity reduces adverse selection (markout +28%) and adds
-  ~28 ticks/path over plain A-S, with fewer but better fills.
-- A larger widening factor lowers adverse selection further but gives up too much volume
-  (swept 0.5-4); the P&L-optimal setting is small.
-
-## Limitations (what I'd say in an interview)
-- Stylised flow: depth is exponential, impact is a constant permanent shift, no queue
-  position, latency, fees/rebates, or multi-level book.
-- Excitation is read exactly from the generator; a live system would estimate it from
-  recent trades (an EWMA of signed flow), adding noise.
-- Results show the mechanism, not a tradeable P&L figure.
+Public API responses are cached under `data/`, so reruns are fast and resumable (Kalshi
+rate-limits, so first pulls are slow).
 
 ## Layout
 ```
-mmsim/       flow.py (Hawkes + impact), strategies.py, engine.py
-quantlab/    backtesting + validation toolkit
-tests/       16 tests   examples/   demos and plots
+digitaledge/  data sources, vol models, digital pricing, SVI, scoring, backtest, rain study, collector
+mmsim/        Hawkes market-making simulator
+quantlab/     backtesting toolkit
+tests/        30 tests, all offline (synthetic data with known ground truth)
+scripts/      local collector loop
+data_live/    forward snapshots (gzip CSV)
 ```
-
-## Roadmap
-- [ ] Fit Hawkes parameters to real L2/trade data (MLE) and estimate intensity online
-- [ ] Queue-position model and latency
-- [ ] Learn quoting with RL / dynamic programming and compare to A-S
