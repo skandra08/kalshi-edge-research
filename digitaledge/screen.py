@@ -256,3 +256,56 @@ def sample_events(markets, n_events=60, per_event=3, min_volume=20, min_events=4
         gg = g[g["event_ticker"].isin(pick)].sort_values("volume", ascending=False)
         out.append(gg.groupby("event_ticker").head(per_event))
     return pd.concat(out, ignore_index=True)
+
+
+def _parse_batch(markets_json):
+    rows = []
+    for m in markets_json.get("markets", []):
+        t = m.get("market_ticker") or m.get("ticker")
+        for c in m.get("candlesticks", []):
+            try:
+                rows.append((t, c["end_period_ts"], _px(c.get("yes_bid")), _px(c.get("yes_ask")),
+                             _num(c.get("volume_fp", c.get("volume")))))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return rows
+
+
+def fetch_candles_batch(sample, out_csv, batch=40, workers=2, fallback=True):
+    """Same output as fetch_candles but via GET /markets/candlesticks (many markets per call).
+    Tickers the batch endpoint returns nothing for fall back to the per-market (live/historical) path."""
+    import os
+    done = set(pd.read_csv(out_csv, usecols=["ticker"])["ticker"]) if os.path.exists(out_csv) else set()
+    todo = sample[~sample["ticker"].isin(done)].copy()
+    todo["period"] = np.where(todo["life_h"] <= 6, 1, 60)
+    jobs = []
+    for period, g in todo.groupby("period"):
+        g = g.sort_values("close_time")
+        for i in range(0, len(g), batch):
+            part = g.iloc[i:i + batch]
+            jobs.append((period, list(part["ticker"]), part["open_time"].min(), part["close_time"].max()))
+
+    def run(job):
+        period, tickers, start, end = job
+        try:
+            d = get_json(f"{BASE}/markets/candlesticks", {"market_tickers": ",".join(tickers),
+                         "start_ts": int(start.timestamp()), "end_ts": int(end.timestamp()), "period_interval": int(period)})
+            return tickers, _parse_batch(d)
+        except Exception:
+            return tickers, []
+
+    n = 0
+    with ThreadPoolExecutor(workers) as ex:
+        for tickers, rows in ex.map(run, jobs):
+            got = {r[0] for r in rows}
+            missing = [t for t in tickers if t not in got]
+            if fallback and missing:                 # per-market path (historical first for old markets)
+                sub = todo[todo["ticker"].isin(missing)]
+                for r in sub.itertuples():
+                    rows += _candle_job((r.ticker, r.series, r.open_time, r.close_time, int(r.period)))
+                got = {r[0] for r in rows}
+            rows += [(t, 0, np.nan, np.nan, np.nan) for t in tickers if t not in got]
+            pd.DataFrame(rows, columns=["ticker", "ts", "yes_bid", "yes_ask", "volume"]).to_csv(
+                out_csv, mode="a", header=not os.path.exists(out_csv), index=False)
+            n += len(tickers)
+            print(f"{n}/{len(todo)}", flush=True)
