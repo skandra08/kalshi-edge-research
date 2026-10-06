@@ -202,12 +202,14 @@ def bh_fdr(p, alpha=0.05):
     return mask
 
 
-def evaluate(q, fee_mult_by_series=None, min_n=40, n_boot=1500):
+def evaluate(q, fee_mult_by_series=None, min_n=40, n_boot=1500, min_events=25, min_events_half=10):
     """Test every (series, entry fraction, rule); replicate on the later half of each series' history."""
     rows = []
     fm = fee_mult_by_series or {}
     for (series, frac), g in q.groupby(["series", "frac"]):
-        g = g.assign(day=pd.to_datetime(g["close_time"], utc=True).dt.floor("D"))
+        # strikes of one event share one outcome path, so the independent unit is the event
+        key = g["event_ticker"] if "event_ticker" in g else pd.to_datetime(g["close_time"], utc=True).dt.floor("D")
+        g = g.assign(day=key.to_numpy())
         mid = ((g["yes_bid"] + g["yes_ask"]) / 2).to_numpy()
         cut = g["close_time"].median()
         early = (g["close_time"] <= cut).to_numpy()
@@ -216,11 +218,13 @@ def evaluate(q, fee_mult_by_series=None, min_n=40, n_boot=1500):
             if s.sum() < min_n:
                 continue
             gg, e = g[s], early[s]
+            if gg["day"].nunique() < min_events:      # too few independent events: bootstrap is meaningless
+                continue
             pnl = pnl_rule(gg, side, fm.get(series, 1.0))
             m, lo, hi, p = boot_mean(pnl, gg["day"], n_boot)
             row = dict(series=series, frac=frac, rule=name, n=len(gg), days=gg["day"].nunique(), pnl=m, lo=lo, hi=hi, p=p,
                        cost=float(np.mean(gg["yes_ask"] if side == "yes" else 1 - gg["yes_bid"])))
-            if e.sum() >= 20 and (~e).sum() >= 20:
+            if gg["day"][e].nunique() >= min_events_half and gg["day"][~e].nunique() >= min_events_half:
                 tm, tl, th, tp = boot_mean(pnl[~e], gg["day"][~e], n_boot)
                 trm, trl, trh, trp = boot_mean(pnl[e], gg["day"][e], n_boot)
                 row.update(train_pnl=trm, train_p=trp, test_pnl=tm, test_lo=tl, test_hi=th, test_p=tp)
@@ -231,3 +235,24 @@ def evaluate(q, fee_mult_by_series=None, min_n=40, n_boot=1500):
     t["fdr_sig"] = bh_fdr(t["p"].to_numpy())
     t["replicates"] = t["fdr_sig"] & (t.get("test_lo", np.nan) > 0)
     return t
+
+
+def sample_events(markets, n_events=60, per_event=3, min_volume=20, min_events=40):
+    """Event-based sample: for each series, n_events events spread evenly over its history, and the
+    `per_event` highest-volume liquid markets in each. Gives the many independent events per series
+    that cluster-robust inference needs (sampling the most recent markets yields only a few days)."""
+    m = markets.copy()
+    for c in ("open_time", "close_time"):
+        m[c] = pd.to_datetime(m[c], utc=True, format="ISO8601")
+    m = m[(m["volume"] >= min_volume) & m["open_time"].notna()]
+    m["life_h"] = (m["close_time"] - m["open_time"]).dt.total_seconds() / 3600
+    m = m[(m["life_h"] > 0.2) & (m["life_h"] < 24 * 14)]
+    out = []
+    for series, g in m.groupby("series"):
+        ev = g.groupby("event_ticker")["close_time"].max().sort_values()
+        if len(ev) < min_events:
+            continue
+        pick = ev.index[np.unique(np.linspace(0, len(ev) - 1, min(n_events, len(ev))).round().astype(int))]
+        gg = g[g["event_ticker"].isin(pick)].sort_values("volume", ascending=False)
+        out.append(gg.groupby("event_ticker").head(per_event))
+    return pd.concat(out, ignore_index=True)
