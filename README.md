@@ -21,6 +21,20 @@ engine, walk-forward, Deflated Sharpe) in the same repo.
 - **Held-out evaluation.** The one tuned parameter (`widen`) was chosen on seeds 0-299;
   the demo reports seeds 10000+.
 
+## Running it locally (free, no cloud needed)
+```bash
+git clone https://github.com/skandra08/kalshi-edge-research && cd kalshi-edge-research
+pip install -e ".[dev]"
+pytest -q
+
+# forward data: leave this running (laptop, Raspberry Pi, or a $5 VPS); it commits hourly
+bash scripts/collect_forever.sh
+
+# historical studies (API responses are cached under data/, so reruns are instant)
+python -m digitaledge study --start 2026-09-15 --end 2026-10-05
+```
+Kalshi rate-limits public requests, so first-time pulls take a while; the cache makes them resumable.
+
 ## Run it
 ```bash
 pip install -e ".[dev]"
