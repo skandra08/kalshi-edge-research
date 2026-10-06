@@ -39,6 +39,23 @@ def settled_markets(series="KXRAIN"):
     return df[["ticker", "event_ticker", "city", "open_time", "close_time", "date", "yes", "volume", "src"]]
 
 
+def _num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _px(block):
+    """Close price from a bid/ask block under either key spelling (dollars string or cents)."""
+    if not isinstance(block, dict):
+        return np.nan
+    if block.get("close_dollars") not in (None, ""):
+        return _num(block["close_dollars"])
+    c = _num(block.get("close"))
+    return c / 100 if c == c and c > 1 else c
+
+
 def _candles(args):
     ticker, series, start, end, src = args
     paths = [f"{BASE}/series/{series}/markets/{ticker}/candlesticks",
@@ -53,10 +70,15 @@ def _candles(args):
             continue
         cs = d.get("candlesticks", [])
         if cs:
-            f = lambda x: float(x) if x not in (None, "") else np.nan
-            return [(ticker, pd.to_datetime(c["end_period_ts"], unit="s", utc=True),
-                     f(c["yes_bid"].get("close_dollars")), f(c["yes_ask"].get("close_dollars")),
-                     f(c["volume_fp"])) for c in cs]
+            rows = []
+            for c in cs:
+                try:
+                    rows.append((ticker, pd.to_datetime(c["end_period_ts"], unit="s", utc=True),
+                                 _px(c.get("yes_bid")), _px(c.get("yes_ask")), _num(c.get("volume_fp", c.get("volume")))))
+                except (KeyError, TypeError, ValueError):
+                    continue          # malformed candle: skip it, keep the market
+            if rows:
+                return rows
     return []
 
 
